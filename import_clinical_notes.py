@@ -38,35 +38,50 @@ def parse_ccda(file_path):
         root = tree.getroot()
 
         # Define the namespace
-        ns = {'hl7': 'urn:hl7-org:v3'}
+        ns = {'cda': 'urn:hl7-org:v3'}
 
-        # Find the encounters section
-        encounters_section = root.find('.//hl7:component/hl7:section[hl7:code[@code="46240-8"]]', namespaces=ns)
+        # Find all sections
+        sections = root.findall('.//cda:section', ns)
 
-        if encounters_section is None:
-            raise ValueError("Encounters section not found in the CCDA file")
+        encounters = []
 
-        # Extract all encounter entries
-        encounters = encounters_section.findall('.//hl7:entry/hl7:encounter', namespaces=ns)
+        for section in sections:
+            # Check if this is the Encounters section
+            code = section.find('cda:code', ns)
+            if code is not None and code.get('code') == '46240-8':
+                # Find all encounter entries
+                entries = section.findall('.//cda:encounter', ns)
 
-        encounter_data = []
+                for entry in entries:
+                    # Extract the encounter description
+                    code_element = entry.find('.//cda:code', ns)
+                    description = code_element.get('displayName') if code_element is not None else "Unknown"
 
-        for encounter in encounters:
-            effective_time = encounter.find('hl7:effectiveTime', namespaces=ns)
-            if effective_time is not None:
-                low_time = effective_time.find('hl7:low', namespaces=ns)
-                if low_time is not None:
-                    date_str = low_time.get('value')
-                    date = datetime.strptime(date_str, "%Y%m%d%H%M%S")
-                    encounter_id = encounter.find('hl7:id', namespaces=ns)
-                    if encounter_id is not None:
-                        encounter_id = encounter_id.get('root')
-                        encounter_data.append((date, encounter_id))
+                    # Extract the encounter dates
+                    effective_time = entry.find('cda:effectiveTime', ns)
+                    if effective_time is not None:
+                        low = effective_time.find('cda:low', ns)
+                        high = effective_time.find('cda:high', ns)
+                        start_date = low.get('value') if low is not None else "Unknown"
+                        end_date = high.get('value') if high is not None else "Unknown"
 
-        if not encounter_data:
-            raise ValueError("No valid encounters found in the CCDA file")
+                        # Convert dates to a more readable format
+                        if start_date != "Unknown":
+                            start_date = datetime.strptime(start_date, "%Y%m%d%H%M%S").strftime("%Y-%m-%d")
+                        if end_date != "Unknown":
+                            end_date = datetime.strptime(end_date, "%Y%m%d%H%M%S").strftime("%Y-%m-%d")
+                    else:
+                        start_date = end_date = "Unknown"
 
-        return encounter_data
+                    encounters.append({
+                        "description": description,
+                        "start_date": start_date,
+                        "end_date": end_date
+                    })
+
+        print(encounters)
+
+        return encounters
 
     except ET.ParseError as e:
         logging.error(f"XML parsing error in file {file_path}: {str(e)}")
