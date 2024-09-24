@@ -5,17 +5,23 @@ from datetime import datetime
 import uuid
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.CRITICAL, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_pid_from_filename(cursor, filename):
-    # Extract fname, lname, and referrerID from the filename
-    parts = filename.split('_')
-    if len(parts) < 2:
-        raise ValueError(f"Filename {filename} does not match expected format")
+    # Remove the file extension
+    name_parts = filename.rsplit('.', 1)[0].split('_')
 
-    fname = parts[0]
-    lname = parts[1]
-    referrerID = parts[2].split('.')[0]
+    # The last part should be the referrerID
+    referrerID = name_parts[-1]
+
+    # The second to last part should be the last name
+    lname = name_parts[-2]
+
+    # Everything else is considered part of the first name
+    fname = ' '.join(name_parts[:-2])
+
+    if not fname or not lname or not referrerID:
+        raise ValueError(f"Filename {filename} does not match expected format")
 
     # Query the patient_data table
     query = """
@@ -47,7 +53,7 @@ def get_encounter_from_pid_date(cursor, pid, date):
 
     return result[0]
 
-def parse_ccda(cursor, file_path):
+def parse_ccda(cursor, pid, file_path):
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -88,23 +94,24 @@ def parse_ccda(cursor, file_path):
                     else:
                         start_date = end_date = "Unknown"
 
-                    filename = os.path.basename(file_path)
-                    pid = get_pid_from_filename(cursor, filename)
-                    encounter = get_encounter_from_pid_date(cursor, pid, start_date)
-
-                    encounters.append({
-                        "date": start_date,
-                        "encounter_id": encounter
-                    })
+                    try:
+                        encounter = get_encounter_from_pid_date(cursor, pid, start_date)
+                        encounters.append({
+                            "date": start_date,
+                            "encounter_id": encounter
+                        })
+                    except ValueError as e:
+                        logging.warning(f"No encounter found for pid {pid} on date {start_date}: {str(e)}")
+                        # Continue processing other encounters even if one fails
 
         return encounters
 
     except ET.ParseError as e:
         logging.error(f"XML parsing error in file {file_path}: {str(e)}")
-        raise
+        return []
     except Exception as e:
         logging.error(f"Error processing CCDA file {file_path}: {str(e)}")
-        raise
+        return []
 
 def parse_clinical_note(file_path):
     with open(file_path, 'r') as file:
@@ -116,7 +123,7 @@ def parse_clinical_note(file_path):
     current_content = []
 
     for line in content.split('\n'):
-        if line.strip() and len(line.split('-')) == 3:  # Assume this is a date
+        if line.strip() and len(line.strip().split('-')) == 3 and len(line.strip())==10:  # Assume this is a date
             if current_date:
                 notes[current_date] = '\n'.join(current_content)
             current_date = str(datetime.strptime(line.strip(), "%Y-%m-%d").date())
@@ -148,50 +155,85 @@ def insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter, descr
 
 def process_files(ccda_folder, notes_folder, db_config):
     conn = mysql.connector.connect(**db_config)
-    cursor = conn.cursor()
+    cursor = conn.cursor(buffered=True)
 
     total_files = len([f for f in os.listdir(ccda_folder) if f.endswith('.xml')])
     processed_files = 0
     skipped_files = 0
+    skip_reasons = {
+        'no_pid': 0,
+        'no_encounters': 0,
+        'no_notes': 0,
+        'other_error': 0
+    }
 
     for ccda_file in os.listdir(ccda_folder):
         if ccda_file.endswith('.xml'):
             ccda_path = os.path.join(ccda_folder, ccda_file)
             try:
                 # Get pid from filename
-                pid = get_pid_from_filename(cursor, ccda_file)
-                encounter_data = parse_ccda(cursor, ccda_path)
+                try:
+                    pid = get_pid_from_filename(cursor, ccda_file)
+                except ValueError as e:
+                    logging.warning(f"Skipping file {ccda_file}: {str(e)}")
+                    skipped_files += 1
+                    skip_reasons['no_pid'] += 1
+                    continue
+
+                encounter_data = parse_ccda(cursor, pid, ccda_path)
+
+                if not encounter_data:
+                    logging.warning(f"No valid encounters found in {ccda_file}")
+                    skipped_files += 1
+                    skip_reasons['no_encounters'] += 1
+                    continue
 
                 # Assume the notes file has the same name but with a .txt extension
                 notes_file = ccda_file.replace('.xml', '.txt')
                 notes_path = os.path.join(notes_folder, notes_file)
 
-                if os.path.exists(notes_path):
-                    notes = parse_clinical_note(notes_path)
-                    for encounter in encounter_data:
-                        date = encounter['date']
-                        encounter_id = encounter['encounter_id']
+                if not os.path.exists(notes_path):
+                    logging.warning(f"No corresponding notes file found for {ccda_file}")
+                    skipped_files += 1
+                    skip_reasons['no_notes'] += 1
+                    continue
 
-                        if date in notes:
-                            # Insert into forms table
-                            form_id = insert_into_forms(cursor, date, encounter_id, pid)
+                notes = parse_clinical_note(notes_path)
+                encounters_processed = 0
+                for encounter in encounter_data:
+                    date = encounter['date']
+                    encounter_id = encounter['encounter_id']
 
-                            # Insert into form_clinical_notes table
-                            insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter_id, notes[date])
+                    if date in notes:
+                        # Insert into forms table
+                        form_id = insert_into_forms(cursor, date, encounter_id, pid)
 
-                processed_files += 1
+                        # Insert into form_clinical_notes table
+                        insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter_id, notes[date])
+                        encounters_processed += 1
+
+                if encounters_processed > 0:
+                    processed_files += 1
+                else:
+                    logging.warning(f"No encounters processed for {ccda_file}")
+                    skipped_files += 1
+                    skip_reasons['no_encounters'] += 1
+
                 if processed_files % 100 == 0:  # Log progress every 100 files
-                    logging.info(f"Processed {processed_files}/{total_files} files")
+                    logging.critical(f"Processed {processed_files}/{total_files} files")
 
             except Exception as e:
                 logging.error(f"Error processing file {ccda_file}: {str(e)}")
                 skipped_files += 1
+                skip_reasons['other_error'] += 1
+                continue  # Continue to the next file even if there's an error
 
     conn.commit()
     cursor.close()
     conn.close()
 
-    logging.info(f"Processing complete. Total files: {total_files}, Processed: {processed_files}, Skipped: {skipped_files}")
+    logging.critical(f"Processing complete. Total files: {total_files}, Processed: {processed_files}, Skipped: {skipped_files}")
+    logging.critical(f"Skip reasons: {skip_reasons}")
 
 
 # Configuration
@@ -202,8 +244,8 @@ db_config = {
     'database': 'openemr'
 }
 
-ccda_folder = '/home/sunbiz/test_data/ccda'
-notes_folder = '/home/sunbiz/test_data/notes'
+ccda_folder = '/home/sunbiz/11k_data/moved_ccda'
+notes_folder = '/home/sunbiz/11k_data/moved_notes'
 
 # Run the processing
 process_files(ccda_folder, notes_folder, db_config)
