@@ -36,3 +36,15 @@ CREATE INDEX idx_form_clinical_notes_pid ON form_clinical_notes (pid);
  
 UPDATE openemr.forms SET form_id = id WHERE formdir = 'clinical_notes';
 ```
+
+* Unrelated, by useful to get random SSN-like in patient full
+```
+UPDATE patient_data
+SET ss = CONCAT(
+    LPAD(FLOOR(RAND() * 1000), 3, '0'),
+    '-',
+    LPAD(FLOOR(RAND() * 100), 2, '0'),
+    '-',
+    LPAD(FLOOR(RAND() * 10000), 4, '0')
+);
+```
