@@ -32,7 +32,22 @@ def get_pid_from_filename(cursor, filename):
 
     return result[0]
 
-def parse_ccda(file_path):
+def get_encounter_from_pid_date(cursor, pid, date):
+    # Query the patient_data table
+    query = """
+    SELECT encounter FROM form_encounter 
+    WHERE pid = %s AND date LIKE %s;
+    """
+
+    cursor.execute(query, (pid, date + '%'))
+    result = cursor.fetchone()
+
+    if result is None:
+        raise ValueError(f"No encounter found for {pid} {date}")
+
+    return result[0]
+
+def parse_ccda(cursor, file_path):
     try:
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -73,13 +88,14 @@ def parse_ccda(file_path):
                     else:
                         start_date = end_date = "Unknown"
 
-                    encounters.append({
-                        "description": description,
-                        "start_date": start_date,
-                        "end_date": end_date
-                    })
+                    filename = os.path.basename(file_path)
+                    pid = get_pid_from_filename(cursor, filename)
+                    encounter = get_encounter_from_pid_date(cursor, pid, start_date)
 
-        print(encounters)
+                    encounters.append({
+                        "date": start_date,
+                        "encounter_id": encounter
+                    })
 
         return encounters
 
@@ -103,7 +119,7 @@ def parse_clinical_note(file_path):
         if line.strip() and len(line.split('-')) == 3:  # Assume this is a date
             if current_date:
                 notes[current_date] = '\n'.join(current_content)
-            current_date = datetime.strptime(line.strip(), "%Y-%m-%d")
+            current_date = str(datetime.strptime(line.strip(), "%Y-%m-%d").date())
             current_content = []
         else:
             current_content.append(line)
@@ -113,22 +129,22 @@ def parse_clinical_note(file_path):
 
     return notes
 
-# def insert_into_forms(cursor, date, encounter, pid, form_name='Clinical Notes'):
-#     query = """
-#     INSERT INTO forms (date, encounter, form_name, pid, user, groupname, authorized, formdir)
-#     VALUES (%s, %s, %s, %s, 'admin', 'Default', 1, 'clinical_notes')
-#     """
-#     cursor.execute(query, (date, encounter, form_name, pid))
-#     return cursor.lastrowid
-#
-# def insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter, description):
-#     query = """
-#     INSERT INTO form_clinical_notes (form_id, uuid, date, pid, encounter, user, groupname,
-#                                      authorized, activity, description, clinical_notes_type)
-#     VALUES (%s, %s, %s, %s, %s, 'admin', 'Default', 1, 1, %s, 'Clinical Note')
-#     """
-#     note_uuid = uuid.uuid4().bytes
-#     cursor.execute(query, (form_id, note_uuid, date, pid, encounter, description))
+def insert_into_forms(cursor, date, encounter, pid, form_name='Clinical Notes'):
+    query = """
+    INSERT INTO forms (date, encounter, form_name, pid, user, groupname, authorized, formdir)
+    VALUES (%s, %s, %s, %s, 'admin', 'Default', 1, 'clinical_notes')
+    """
+    cursor.execute(query, (date, encounter, form_name, pid))
+    return cursor.lastrowid
+
+def insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter, description):
+    query = """
+    INSERT INTO form_clinical_notes (form_id, uuid, date, pid, encounter, user, groupname,
+                                     authorized, activity, description, clinical_notes_type)
+    VALUES (%s, %s, %s, %s, %s, 'admin', 'Default', 1, 1, %s, 'Clinical Note')
+    """
+    note_uuid = uuid.uuid4().bytes
+    cursor.execute(query, (form_id, note_uuid, date, pid, encounter, description))
 
 def process_files(ccda_folder, notes_folder, db_config):
     conn = mysql.connector.connect(**db_config)
@@ -144,8 +160,7 @@ def process_files(ccda_folder, notes_folder, db_config):
             try:
                 # Get pid from filename
                 pid = get_pid_from_filename(cursor, ccda_file)
-
-                encounter_data = parse_ccda(ccda_path)
+                encounter_data = parse_ccda(cursor, ccda_path)
 
                 # Assume the notes file has the same name but with a .txt extension
                 notes_file = ccda_file.replace('.xml', '.txt')
@@ -153,15 +168,16 @@ def process_files(ccda_folder, notes_folder, db_config):
 
                 if os.path.exists(notes_path):
                     notes = parse_clinical_note(notes_path)
+                    for encounter in encounter_data:
+                        date = encounter['date']
+                        encounter_id = encounter['encounter_id']
 
-                    for date, encounter_id in encounter_data:
                         if date in notes:
-                            print(date, encounter_id, pid, notes[date])
                             # Insert into forms table
-                            #form_id = insert_into_forms(cursor, date, encounter_id, pid)
+                            form_id = insert_into_forms(cursor, date, encounter_id, pid)
 
                             # Insert into form_clinical_notes table
-                            #insert_into_form_clinical_notes(cursor, form_id, date.date(), pid, encounter_id, notes[date])
+                            insert_into_form_clinical_notes(cursor, form_id, date, pid, encounter_id, notes[date])
 
                 processed_files += 1
                 if processed_files % 100 == 0:  # Log progress every 100 files
