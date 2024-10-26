@@ -39,12 +39,27 @@ UPDATE openemr.forms SET form_id = id WHERE formdir = 'clinical_notes';
 
 * Unrelated, by useful to get random SSN-like in patient full
 ```
-UPDATE patient_data
-SET ss = CONCAT(
-    LPAD(FLOOR(RAND() * 1000), 3, '0'),
+
+CREATE TEMPORARY TABLE temp_patient_numbers AS
+SELECT
+    patient_id,
+    @row := @row + 1 AS row_num
+FROM
+    patient_data,
+    (SELECT @row := 0) AS init
+ORDER BY
+    RAND();
+
+UPDATE patient_data p
+JOIN temp_patient_numbers t ON p.patient_id = t.patient_id
+SET p.ss = CONCAT(
+    LPAD(1 + MOD(t.row_num * 17 + 123, 900), 3, '0'),
     '-',
-    LPAD(FLOOR(RAND() * 100), 2, '0'),
+    LPAD(1 + MOD(t.row_num * 31 + 456, 100), 2, '0'),
     '-',
-    LPAD(FLOOR(RAND() * 10000), 4, '0')
+    LPAD(1 + MOD(t.row_num * 73 + 789, 10000), 4, '0')
 );
+
+DROP TEMPORARY TABLE temp_patient_numbers;
+
 ```
