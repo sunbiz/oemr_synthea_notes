@@ -42,7 +42,7 @@ UPDATE openemr.forms SET form_id = id WHERE formdir = 'clinical_notes';
 
 CREATE TEMPORARY TABLE temp_patient_numbers AS
 SELECT
-    patient_id,
+    id,
     @row := @row + 1 AS row_num
 FROM
     patient_data,
@@ -51,7 +51,7 @@ ORDER BY
     RAND();
 
 UPDATE patient_data p
-JOIN temp_patient_numbers t ON p.patient_id = t.patient_id
+JOIN temp_patient_numbers t ON p.id = t.id
 SET p.ss = CONCAT(
     LPAD(1 + MOD(t.row_num * 17 + 123, 900), 3, '0'),
     '-',
